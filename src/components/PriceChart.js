@@ -1,86 +1,134 @@
 // src/components/PriceChart.js
 
 import React from 'react';
-import { Line } from 'react-chartjs-2';
-import {
-    Chart as ChartJS,
-    CategoryScale,
-    LinearScale,
-    PointElement,
-    LineElement,
-    Title,
-    Tooltip,
-    Legend,
-} from 'chart.js';
+// Candlestick aur Bar chart types ke liye import
+import { CandlestickController, CandlestickElement } from 'chartjs-chart-financial';
+// FIX: Sabhi zaruri scales, controllers aur elements ko import karein
+import { Chart as ChartJS, LinearScale, Tooltip, TimeScale, TimeSeriesScale, BarController, BarElement } from 'chart.js';
+import 'chartjs-adapter-date-fns'; // Time-series adapter
+import { Chart } from 'react-chartjs-2'; 
 
-// Chart.js ke zaroori modules ko register karein
+// FIX: Modules ko register karein
 ChartJS.register(
-    CategoryScale,
-    LinearScale,
-    PointElement,
-    LineElement,
-    Title,
+    TimeScale,
+    TimeSeriesScale,
+    LinearScale, 
     Tooltip,
-    Legend
+    // Candlestick registration
+    CandlestickController,
+    CandlestickElement,
+    // Volume registration
+    BarController, 
+    BarElement     
 );
 
-const PriceChart = ({ chartData }) => {
-    // 1. Data ko Chart.js format mein convert karein
-    const data = {
-        // Labels (X-axis) mein time aayega
-        labels: chartData.map(d => d.time), 
+const CandlestickChart = ({ candlestickData }) => {
+    
+    // Data ko Candlestick aur Volume datasets mein structure karna
+    const chartData = {
+        // Labels mein time string pass ho raha hai
+        labels: candlestickData.map(d => d.time), 
         datasets: [
+            // 1. Candlestick Dataset (Main Chart)
             {
-                label: 'BTC/USDT Live Price',
-                // Data (Y-axis) mein price aayega
-                data: chartData.map(d => d.price), 
-                fill: false,
-                backgroundColor: 'rgba(75, 192, 192, 0.4)',
-                borderColor: 'rgba(75, 192, 192, 1)',
-                pointRadius: 0, // Points nahi dikhayenge for cleaner look
-                tension: 0.1, // Line ko smooth karein
+                label: 'Price',
+                data: candlestickData,
+                type: 'candlestick', 
+                barThickness: 10,
+                yAxisID: 'yPrice', // Main Price Axis
+                // Candlestick colors based on OHLC
+                borderColor: (context) => context.raw.open < context.raw.close ? 'green' : 'red', 
+                color: (context) => context.raw.open < context.raw.close ? 'green' : 'red',
             },
+            // 2. Volume Dataset (Bar Chart)
+            {
+                label: 'Volume',
+                // Data mein volume aur OHLC info shamil karein (color decision ke liye)
+                data: candlestickData.map(d => ({ x: d.time, y: d.volume, open: d.open, close: d.close })),
+                type: 'bar',
+                yAxisID: 'yVolume', // Separate Volume Axis
+                // Volume bar colors (matching candlestick color)
+                backgroundColor: (context) => context.raw.open < context.raw.close ? 'rgba(0, 128, 0, 0.4)' : 'rgba(255, 0, 0, 0.4)',
+                borderWidth: 0,
+            }
         ],
     };
 
-    // 2. Chart Options define karein
     const options = {
         responsive: true,
-        maintainAspectRatio: false, // Taki aap custom size de saken
-        animation: false, // Real-time data mein animation band karein
+        maintainAspectRatio: false,
+        animation: false,
+        // Y-axis parsing ab sirf Candlestick data ke liye hai
+        parsing: {
+            xAxisKey: 'time',
+            yAxisKey: ['open', 'high', 'low', 'close'] 
+        },
         scales: {
             x: {
-                // X-axis par sirf 5 labels dikhao, bahut saare time stamps se bachne ke liye
-                ticks: {
-                    maxTicksLimit: 5 
+                type: 'timeseries', 
+                time: {
+                    unit: 'minute',
+                    displayFormats: {
+                        minute: 'h:mm:ss a'
+                    }
                 },
+                title: { display: true, text: 'Time' },
             },
-            y: {
-                // Y-axis ko dynamic rakhne ke liye settings
-                beginAtZero: false,
+            // Main Price Axis (Left side)
+            yPrice: {
+                position: 'left',
+                title: { display: true, text: 'Price (USDT)' },
+                grid: { borderColor: 'rgba(200, 200, 200, 0.2)' },
             },
+            // Volume Axis (Right side, Hidden Grid)
+            yVolume: {
+                position: 'right', // Right side par dikhega
+                // Volume bars ko Price Chart ke peeche banane se rokein
+                grid: { drawOnChartArea: false }, 
+                title: { display: true, text: 'Volume' },
+                // Volume scale ko auto-adjust karein
+                max: Math.max(...candlestickData.map(d => d.volume)) * 1.5, 
+                min: 0,
+            }
         },
         plugins: {
-            legend: {
-                display: false,
-            },
-            title: {
-                display: true,
-                text: 'Live Price Trend (Last 50 Trades)',
-            },
-        },
+            tooltip: {
+                mode: 'index',
+                intersect: false,
+                callbacks: {
+                    // Tooltip title
+                    title: (context) => `Time: ${context[0].label}`,
+                    label: (context) => {
+                        // Candlestick data
+                        if (context.datasetIndex === 0 && context.raw) {
+                            return [
+                                `Open: $${context.raw.open.toFixed(4)}`,
+                                `High: $${context.raw.high.toFixed(4)}`,
+                                `Low: $${context.raw.low.toFixed(4)}`,
+                                `Close: $${context.raw.close.toFixed(4)}`
+                            ];
+                        } 
+                        // Volume data
+                        else if (context.datasetIndex === 1) {
+                             return `Volume: ${context.raw.y.toFixed(2)}`;
+                        }
+                        return '';
+                    }
+                }
+            }
+        }
     };
 
-    // Agar data nahi hai toh loading message dikhayein
-    if (chartData.length === 0) {
-        return <p>Waiting for first batch of live data...</p>;
+    if (candlestickData.length === 0) {
+        return <p>Loading initial data...</p>;
     }
 
+    // Chart type ab default (candlestick) nahi hai, isliye type property ko 'Chart' component se hatana hoga
     return (
-        <div style={{ height: '400px', width: '100%' }}>
-            <Line data={data} options={options} />
+        <div style={{ height: '450px', width: '100%' }}>
+            <Chart data={chartData} options={options} /> 
         </div>
     );
 };
 
-export default PriceChart;
+export default CandlestickChart;
