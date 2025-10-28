@@ -1,52 +1,58 @@
-// src/hooks/useCryptoSocket.js
+import { useState, useEffect, useCallback } from 'react'; 
+import useWebSocket, { ReadyState } from 'react-use-websocket';
+import { calculateSMA } from '../utils/mathUtils'; // FIX: Naye util function ke liye import
 
-import { useState, useEffect } from 'react'; 
-import useWebSocket from 'react-use-websocket';
-
-// REST API endpoint (Binance)
 const REST_API_URL = 'https://api.binance.com/api/v3/klines';
 
-// Hook ab symbol aur interval (e.g., '1m', '5m') dono leta hai
 export const useCryptoSocket = (symbol, interval) => {
     
-    // WebSocket URL ko interval ke saath dynamic banaya gaya
-    const WS_URL = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@kline_${interval}`;
+    // 1. Candlestick WebSocket URL
+    const WS_URL_CANDLE = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@kline_${interval}`;
+    // 2. Live Price WebSocket URL (Symbol Ticker)
+    const WS_URL_TICKER = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`; 
 
-    // react-use-websocket by default auto-reconnection handle karta hai.
-    const { lastMessage, readyState } = useWebSocket(WS_URL); 
-    
+    // Candlestick Connection (kline)
+    const { lastMessage: candleMessage, readyState: candleReadyState } = useWebSocket(WS_URL_CANDLE); 
+    // Live Ticker Connection (trade)
+    const { lastMessage: tickerMessage } = useWebSocket(WS_URL_TICKER);
+
     const [candlestickData, setCandlestickData] = useState([]);
-    const [isLoading, setIsLoading] = useState(true); // Initial data loading state
+    const [movingAverages, setMovingAverages] = useState([]); // SMA data
+    const [liveTickerPrice, setLiveTickerPrice] = useState(null); // Live Ticker Price
+    const [isLoading, setIsLoading] = useState(true);
 
-    // Helper function to process raw kline data (includes volume)
-    const processKline = (k) => ({
-        // Binance kline data format: [openTime, open, high, low, close, volume, closeTime, ...]
-        time: new Date(k[0]).toLocaleTimeString(), 
+    const processKline = useCallback((k) => ({
+        time: new Date(k[0]).getTime(), // Time as number (for SMA calculation)
         open: parseFloat(k[1]),
         high: parseFloat(k[2]),
         low: parseFloat(k[3]),
         close: parseFloat(k[4]),
-        volume: parseFloat(k[5]), // Volume data extracted
-        // kline.x is at index 8 for WebSocket streams
+        volume: parseFloat(k[5]),
         isFinal: k.length > 7 ? k[8] : true 
-    });
+    }), []);
+    
+    // 3. SMA Calculation Effect
+    useEffect(() => {
+        // SMA 20 calculate karein (20 periods ka average)
+        const closes = candlestickData.map(d => d.close);
+        const sma20 = calculateSMA(closes, 20);
+        setMovingAverages(sma20.slice(closes.length - candlestickData.length)); // Ensure lengths match
+    }, [candlestickData]);
 
-    // 1. Initial Data Fetch (REST API)
+
+    // 4. Initial Data Fetch (REST API)
     useEffect(() => {
         setIsLoading(true);
-        setCandlestickData([]); // Clear old data
+        setCandlestickData([]); 
 
         const fetchInitialData = async () => {
             try {
-                // Fetch pichhle 100 Candlesticks ka data
                 const response = await fetch(`${REST_API_URL}?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=100`);
                 const data = await response.json();
                 
                 if (Array.isArray(data)) {
                     const initialCandles = data.map(processKline);
                     setCandlestickData(initialCandles);
-                } else {
-                    console.error("Invalid data structure from REST API:", data);
                 }
             } catch (error) {
                 console.error("Error fetching initial kline data:", error);
@@ -57,26 +63,24 @@ export const useCryptoSocket = (symbol, interval) => {
 
         fetchInitialData();
         
-    }, [symbol, interval]); 
+    }, [symbol, interval, processKline]); 
 
-    // 2. Live Data Processing (WebSocket)
+    // 5. Live Candlestick Update (WebSocket)
     useEffect(() => {
-        if (lastMessage !== null && typeof lastMessage.data === 'string') {
+        if (candleMessage !== null && typeof candleMessage.data === 'string') {
             try {
-                const streamData = JSON.parse(lastMessage.data);
+                const streamData = JSON.parse(candleMessage.data);
                 const kline = streamData.k;
 
                 if (kline) {
                     const newCandle = processKline(kline); 
 
                     setCandlestickData(prevData => {
-                        // Agar candle open hai, toh last candle ko update karo
                         if (!newCandle.isFinal && prevData.length > 0) {
                             const updatedData = [...prevData];
                             updatedData[updatedData.length - 1] = newCandle;
                             return updatedData;
                         } 
-                        // Agar candle closed hai ya naya candle hai, toh use add karo
                         else if (newCandle.isFinal || prevData.length === 0) {
                             if (prevData.length === 0 || prevData[prevData.length - 1].time !== newCandle.time) {
                                 return [...prevData, newCandle].slice(-100); 
@@ -89,9 +93,24 @@ export const useCryptoSocket = (symbol, interval) => {
                 console.error("Error parsing Candlestick message:", error);
             }
         }
-    }, [lastMessage]); 
+    }, [candleMessage, processKline]); 
+    
+    // 6. Live Ticker Price Update
+    useEffect(() => {
+        if (tickerMessage !== null && typeof tickerMessage.data === 'string') {
+            try {
+                const tradeData = JSON.parse(tickerMessage.data);
+                if (tradeData.p) {
+                    setLiveTickerPrice(parseFloat(tradeData.p));
+                }
+            } catch (error) {
+                console.error("Error parsing Ticker message:", error);
+            }
+        }
+    }, [tickerMessage]);
+    
 
     const latestPrice = candlestickData.length > 0 ? candlestickData[candlestickData.length - 1].close : null;
     
-    return { candlestickData, latestPrice, readyState, isLoading };
+    return { candlestickData, latestPrice, readyState: candleReadyState, isLoading, movingAverages, liveTickerPrice };
 };

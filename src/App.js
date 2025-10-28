@@ -1,6 +1,6 @@
 // src/App.js
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useCryptoSocket } from './hooks/useCryptoSocket'; 
 import CandlestickChart from './components/PriceChart'; 
 import './App.css'; 
@@ -18,124 +18,166 @@ const TIMEFRAME_OPTIONS = [
     { label: '1 Hour', value: '1h' },
 ];
 
+// --- Utility Functions for Persistence ---
+const getInitialState = (key, defaultValue) => {
+    // localStorage से user preferences लोड करें
+    const saved = localStorage.getItem(key);
+    if (saved) {
+        try {
+             return JSON.parse(saved);
+        } catch (e) {
+            console.error("Could not parse localStorage item:", key, e);
+            return defaultValue;
+        }
+    }
+    return defaultValue;
+};
+// ----------------------------------------
+
 function Dashboard() {
-    // State for selecting the asset (e.g., btcusdt)
-    const [selectedSymbol, setSelectedSymbol] = useState(COIN_OPTIONS[0].value);
-    // State for selecting the candlestick interval (e.g., 1m, 5m)
-    const [selectedInterval, setSelectedInterval] = useState(TIMEFRAME_OPTIONS[0].value); 
-    
-    // Custom Hook call (symbol aur interval dono pass ho rahe hain)
-    const { candlestickData, latestPrice, readyState, isLoading } = useCryptoSocket(selectedSymbol, selectedInterval); 
+    // 1. User Configuration & Persistence
+    const [selectedSymbol, setSelectedSymbol] = useState(
+        getInitialState('selectedSymbol', COIN_OPTIONS[0].value)
+    );
+    const [selectedInterval, setSelectedInterval] = useState(
+        getInitialState('selectedInterval', TIMEFRAME_OPTIONS[0].value)
+    ); 
+
+    // Custom Hook call (SMA और Live Ticker data भी shamil hai)
+    const { candlestickData, latestPrice, readyState, isLoading, movingAverages, liveTickerPrice } = useCryptoSocket(selectedSymbol, selectedInterval); 
+
+    // useEffect to save preferences to localStorage whenever they change
+    useEffect(() => {
+        localStorage.setItem('selectedSymbol', JSON.stringify(selectedSymbol));
+    }, [selectedSymbol]);
+
+    useEffect(() => {
+        localStorage.setItem('selectedInterval', JSON.stringify(selectedInterval));
+    }, [selectedInterval]);
+
 
     // Connection Status Logic (Error Handling shamil hai)
     const getConnectionStatus = (state) => {
         switch (state) {
             case 1: return { text: 'Open', className: 'status-open' };
             case 0: return { text: 'Connecting...', className: 'status-connecting' };
-            // Status 3: Connection lost/closed. react-use-websocket will automatically attempt to reconnect.
             case 3: return { text: 'Connection Lost (Attempting Reconnect...)', className: 'status-error' }; 
             default: return { text: 'Closed', className: 'status-closed' };
         }
     };
     const status = getConnectionStatus(readyState); 
 
-    // Price Color Logic (green for up, red for down)
-    const [priceColor, setPriceColor] = useState('black');
-    const prevPriceRef = useRef(null); 
-    
+    // Live Ticker Color Flash Logic
+    const [livePriceColor, setLivePriceColor] = useState('black');
+    const prevLivePriceRef = useRef(null); 
+
     useEffect(() => {
-        if (latestPrice && prevPriceRef.current !== null) {
-            if (latestPrice > prevPriceRef.current) {
-                setPriceColor('green');
-            } else if (latestPrice < prevPriceRef.current) {
-                setPriceColor('red');
+        // Ticker price change hone par color flash karein
+        if (liveTickerPrice && prevLivePriceRef.current !== null) {
+            if (liveTickerPrice > prevLivePriceRef.current) {
+                setLivePriceColor('green');
+            } else if (liveTickerPrice < prevLivePriceRef.current) {
+                setLivePriceColor('red');
             }
         }
-        prevPriceRef.current = latestPrice;
+        prevLivePriceRef.current = liveTickerPrice;
         
-        // Price color ko thodi der baad reset karein
+        // Price color ko turant reset karein (ticker fast hota hai)
         const timer = setTimeout(() => {
-            setPriceColor('black');
-        }, 500); 
+            setLivePriceColor('black');
+        }, 150); 
 
         return () => clearTimeout(timer);
-    }, [latestPrice]); 
+    }, [liveTickerPrice]); 
+
 
     // Handlers for UI dropdowns
-    const handleSymbolChange = (event) => {
+    const handleSymbolChange = useCallback((event) => {
         setSelectedSymbol(event.target.value);
-    };
+    }, []);
     
-    const handleIntervalChange = (event) => {
+    const handleIntervalChange = useCallback((event) => {
         setSelectedInterval(event.target.value);
-    };
+    }, []);
+
 
     return (
         <div className="dashboard-container">
             
             <div className="header-section">
-                <h1>📈 Live Crypto Dashboard</h1>
+                <h1>📈 Live Crypto Trading Dashboard</h1>
                 <div className="info-box">
-                    WebSocket Status: <span className={status.className}>{status.text}</span>
+                    WS Status: <span className={status.className}>{status.text}</span>
                 </div>
             </div>
 
+            {/* Selection Bar (Responsive Design ke liye App.css ka upyog) */}
             <div className="selection-bar">
                 {/* Symbol Dropdown */}
-                <label htmlFor="coin-select">Track Asset:</label>
-                <select 
-                    id="coin-select"
-                    value={selectedSymbol}
-                    onChange={handleSymbolChange}
-                >
-                    {COIN_OPTIONS.map(option => (
-                        <option key={option.value} value={option.value}>
-                            {option.label}
-                        </option>
-                    ))}
-                </select>
+                <div className="select-group">
+                    <label htmlFor="coin-select">Asset:</label>
+                    <select 
+                        id="coin-select"
+                        value={selectedSymbol}
+                        onChange={handleSymbolChange}
+                    >
+                        {COIN_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>
+                                {option.label}
+                            </option>
+                        ))}
+                    </select>
+                </div>
                 
                 {/* Interval Dropdown */}
-                <label htmlFor="interval-select" style={{ marginLeft: '20px' }}>Timeframe:</label>
-                <select 
-                    id="interval-select"
-                    value={selectedInterval}
-                    onChange={handleIntervalChange}
-                >
-                    {TIMEFRAME_OPTIONS.map(option => (
-                        <option key={option.value} value={option.value}>
-                            {option.label}
-                        </option>
-                    ))}
-                </select>
+                <div className="select-group">
+                    <label htmlFor="interval-select">Timeframe:</label>
+                    <select 
+                        id="interval-select"
+                        value={selectedInterval}
+                        onChange={handleIntervalChange}
+                    >
+                        {TIMEFRAME_OPTIONS.map(option => (
+                            <option key={option.value} value={option.value}>
+                                {option.label}
+                            </option>
+                        ))}
+                    </select>
+                </div>
             </div>
 
-            <hr style={{ margin: '20px 0' }}/>
+            <hr className="divider"/>
             
-            {/* Current Price Display */}
-            {latestPrice !== null ? (
-                <div className="price-display">
-                    <h2>{selectedSymbol.toUpperCase()} Price ({selectedInterval.toUpperCase()} Candle):</h2>
-                    <h1 style={{ color: priceColor, transition: 'color 0.5s ease' }}>
-                        ${latestPrice.toFixed(4)}
-                    </h1>
-                </div>
-            ) : (
-                <p>Connecting and loading data for {selectedSymbol.toUpperCase()}...</p>
-            )}
+            {/* Current Price Display (Live Ticker Price ka upyog) */}
+            <div className="price-display-section">
+                <h2>{selectedSymbol.toUpperCase()} / {selectedInterval.toUpperCase()}</h2>
+                
+                {liveTickerPrice !== null ? (
+                    <div className="live-price-box">
+                        <span className="live-label">LIVE PRICE</span>
+                        <h1 style={{ color: livePriceColor }} className="live-price-value">
+                            ${liveTickerPrice.toFixed(4)}
+                        </h1>
+                        {/* Candlestick ka latest close price agar chahiye toh yahan dikhayenge */}
+                        <span className="candle-close">Candle Close: ${latestPrice ? latestPrice.toFixed(4) : 'N/A'}</span>
+                    </div>
+                ) : (
+                    <p>Fetching live ticker price...</p>
+                )}
+            </div>
 
-            <hr style={{ margin: '20px 0' }}/>
+            <hr className="divider"/>
             
             {/* Chart Section */}
             <div className="chart-section">
-                {/* Loading state UI: Data fetch hone tak loading message dikhayega */}
                 {isLoading ? (
                     <div className="loading-message">
                         <h2>Loading {selectedInterval} data...</h2>
                         <p>Fetching 100 historical candles via REST API...</p>
                     </div>
                 ) : (
-                    <CandlestickChart candlestickData={candlestickData} /> 
+                    // movingAverages prop ko yahan pass kiya gaya hai
+                    <CandlestickChart candlestickData={candlestickData} movingAverages={movingAverages} /> 
                 )}
             </div>
             
