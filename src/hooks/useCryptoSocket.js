@@ -1,28 +1,35 @@
-import { useState, useEffect, useCallback } from 'react'; 
+// src/hooks/useCryptoSocket.js
+
+import { useState, useEffect, useCallback, useRef } from 'react'; 
 import useWebSocket, { ReadyState } from 'react-use-websocket';
-import { calculateSMA } from '../utils/mathUtils'; // FIX: Naye util function ke liye import
+import { calculateSMA } from '../utils/mathUtils'; 
 
 const REST_API_URL = 'https://api.binance.com/api/v3/klines';
 
+// ----------------------------------------------------
+// Naya Logic: Data Cache (REST data store karne ke liye)
+const dataCache = {}; 
+// Note: Hook ke bahar ek simple JS object use kar rahe hain
+// taaki cache across renders aur hook calls mein bana rahe.
+// ----------------------------------------------------
+
 export const useCryptoSocket = (symbol, interval) => {
     
-    // 1. Candlestick WebSocket URL
     const WS_URL_CANDLE = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@kline_${interval}`;
-    // 2. Live Price WebSocket URL (Symbol Ticker)
     const WS_URL_TICKER = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`; 
 
-    // Candlestick Connection (kline)
+    // Candlestick Connection
     const { lastMessage: candleMessage, readyState: candleReadyState } = useWebSocket(WS_URL_CANDLE); 
-    // Live Ticker Connection (trade)
+    // Live Ticker Connection
     const { lastMessage: tickerMessage } = useWebSocket(WS_URL_TICKER);
 
     const [candlestickData, setCandlestickData] = useState([]);
-    const [movingAverages, setMovingAverages] = useState([]); // SMA data
-    const [liveTickerPrice, setLiveTickerPrice] = useState(null); // Live Ticker Price
+    const [movingAverages, setMovingAverages] = useState([]); 
+    const [liveTickerPrice, setLiveTickerPrice] = useState(null); 
     const [isLoading, setIsLoading] = useState(true);
 
     const processKline = useCallback((k) => ({
-        time: new Date(k[0]).getTime(), // Time as number (for SMA calculation)
+        time: new Date(k[0]).getTime(), 
         open: parseFloat(k[1]),
         high: parseFloat(k[2]),
         low: parseFloat(k[3]),
@@ -31,19 +38,33 @@ export const useCryptoSocket = (symbol, interval) => {
         isFinal: k.length > 7 ? k[8] : true 
     }), []);
     
-    // 3. SMA Calculation Effect
+    // SMA Calculation Effect
     useEffect(() => {
-        // SMA 20 calculate karein (20 periods ka average)
         const closes = candlestickData.map(d => d.close);
         const sma20 = calculateSMA(closes, 20);
-        setMovingAverages(sma20.slice(closes.length - candlestickData.length)); // Ensure lengths match
+        setMovingAverages(sma20.slice(closes.length - candlestickData.length));
     }, [candlestickData]);
 
 
-    // 4. Initial Data Fetch (REST API)
+    // Initial Data Fetch (REST API) aur Caching Logic
     useEffect(() => {
         setIsLoading(true);
         setCandlestickData([]); 
+        
+        const cacheKey = `${symbol.toUpperCase()}_${interval}`;
+
+        // 1. Cache Check
+        if (dataCache[cacheKey]) {
+            console.log(`[Cache Hit] Loading ${cacheKey} from cache.`);
+            // Cache hit: Cached data load karein aur loading band karein
+            setCandlestickData(dataCache[cacheKey]);
+            setIsLoading(false);
+            // WS connection automatically start ho chuka hai
+            return; 
+        }
+
+        // 2. Cache Miss: Fetch Data
+        console.log(`[Cache Miss] Fetching ${cacheKey} via REST API.`);
 
         const fetchInitialData = async () => {
             try {
@@ -52,6 +73,8 @@ export const useCryptoSocket = (symbol, interval) => {
                 
                 if (Array.isArray(data)) {
                     const initialCandles = data.map(processKline);
+                    // Cache Miss: Data ko cache mein store karein
+                    dataCache[cacheKey] = initialCandles; 
                     setCandlestickData(initialCandles);
                 }
             } catch (error) {
@@ -65,7 +88,7 @@ export const useCryptoSocket = (symbol, interval) => {
         
     }, [symbol, interval, processKline]); 
 
-    // 5. Live Candlestick Update (WebSocket)
+    // Live Candlestick Update (WebSocket)
     useEffect(() => {
         if (candleMessage !== null && typeof candleMessage.data === 'string') {
             try {
@@ -79,11 +102,17 @@ export const useCryptoSocket = (symbol, interval) => {
                         if (!newCandle.isFinal && prevData.length > 0) {
                             const updatedData = [...prevData];
                             updatedData[updatedData.length - 1] = newCandle;
+                            // WS update ke baad, cache ko bhi update karein taaki data taza rahe
+                            const cacheKey = `${symbol.toUpperCase()}_${interval}`;
+                            dataCache[cacheKey] = updatedData;
                             return updatedData;
                         } 
                         else if (newCandle.isFinal || prevData.length === 0) {
                             if (prevData.length === 0 || prevData[prevData.length - 1].time !== newCandle.time) {
-                                return [...prevData, newCandle].slice(-100); 
+                                const newData = [...prevData, newCandle].slice(-100);
+                                const cacheKey = `${symbol.toUpperCase()}_${interval}`;
+                                dataCache[cacheKey] = newData; // Cache update
+                                return newData; 
                             }
                         }
                         return prevData;
@@ -93,9 +122,9 @@ export const useCryptoSocket = (symbol, interval) => {
                 console.error("Error parsing Candlestick message:", error);
             }
         }
-    }, [candleMessage, processKline]); 
+    }, [candleMessage, processKline, symbol, interval]); // Dependency mein symbol aur interval jodne se WS update bhi cache ko sahi se update kar paayega
     
-    // 6. Live Ticker Price Update
+    // Live Ticker Price Update
     useEffect(() => {
         if (tickerMessage !== null && typeof tickerMessage.data === 'string') {
             try {
