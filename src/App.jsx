@@ -4,6 +4,8 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
 
+// Load Tailwind CSS (Assumed to be available in the environment)
+
 // --- Global Configuration & Setup ---
 // NOTE FOR LOCAL DEVELOPMENT:
 // The variables below (prefixed with __) are automatically provided when running
@@ -25,7 +27,6 @@ const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__f
 const appId = typeof __app_id !== 'undefined' ? __app_id : mockAppId;
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : mockAuthToken;
 
-
 // Initialize Firebase (will be done in useEffect)
 let app, db, auth;
 
@@ -37,6 +38,7 @@ const calculateSMA = (data, window) => {
         if (i < window - 1) {
             sma.push(null);
         } else {
+            // Calculate sum of the last 'window' closing prices
             const sum = closes.slice(i - window + 1, i + 1).reduce((a, b) => a + b, 0);
             sma.push(sum / window);
         }
@@ -44,7 +46,7 @@ const calculateSMA = (data, window) => {
     return sma;
 };
 
-// --- Custom Hook: useCryptoSocket (Original Logic Integrated) ---
+// --- Custom Hook: useCryptoSocket ---
 const useCryptoSocket = (symbol, interval) => {
     const [candlestickData, setCandlestickData] = useState([]);
     const [latestPrice, setLatestPrice] = useState(null);
@@ -67,9 +69,11 @@ const useCryptoSocket = (symbol, interval) => {
             const response = await fetch(url);
             const rawData = await response.json();
 
-            if (rawData.code === -1121) {
-                console.error("Invalid symbol or interval:", rawData.msg);
+            if (rawData.code === -1121 || rawData.length === 0) {
+                console.error("Invalid symbol, interval, or no data available.", rawData);
                 setCandlestickData([]);
+                setMovingAverages({ sma5: [], sma20: [] });
+                setLatestPrice(null);
                 setIsLoading(false);
                 return;
             }
@@ -137,19 +141,18 @@ const useCryptoSocket = (symbol, interval) => {
                 };
 
                 setCandlestickData(prevData => {
-                    const newData = [...prevData];
-                    // If the latest candle is not closed, replace it (update in progress)
-                    if (!newData.length || !kline.x) { // Use kline.x (isFinal) for real-time check
-                        if (newData.length > 0) {
-                            newData[newData.length - 1] = newCandle;
-                        } else {
-                            newData.push(newCandle);
-                        }
+                    let newData = [...prevData];
+
+                    // Check if the incoming candle data is for the current, unclosed candle
+                    if (newData.length > 0 && newCandle.openTime === newData[newData.length - 1].openTime) {
+                         // Update the existing last candle (real-time tick update)
+                        newData[newData.length - 1] = newCandle;
                     } 
-                    // If the latest candle is closed (final), and the new update is for a NEW candle (different openTime)
-                    else if (newCandle.openTime > newData[newData.length - 1].openTime) {
+                    // Check if it's a new candle (openTime is greater than last one)
+                    else if (newData.length === 0 || newCandle.openTime > newData[newData.length - 1].openTime) {
+                        // Add new candle
                         newData.push(newCandle);
-                        if (newData.length > 100) newData.shift(); // Keep only last 100
+                        if (newData.length > 100) newData = newData.slice(-100); // Keep only last 100
                     }
                     
                     // Recalculate MAs and update latest price on every message
@@ -166,7 +169,7 @@ const useCryptoSocket = (symbol, interval) => {
         ws.onclose = () => {
             console.log('Kline WS closed. Attempting reconnect...');
             setReadyState(3); // Connection Lost
-            // Simple reconnect logic (In a real app, use exponential backoff)
+            // Reconnect only if the symbol/interval hasn't changed since this effect ran
             setTimeout(() => {
                 if (currentSymbolRef.current === symbol && currentIntervalRef.current === interval) {
                     // Re-run the effect to re-establish connection
@@ -218,42 +221,65 @@ const useCryptoSocket = (symbol, interval) => {
 
 // --- Candlestick Chart Visualization Component ---
 
+const CHART_HEIGHT_PX = 384; // h-96 in Tailwind
+
 const PriceChart = ({ candlestickData, movingAverages }) => {
     // Only show the last 20 candles for simple visualization
     const displayData = candlestickData.slice(-20);
+    
+    // Get the latest SMA values for the header display
     const latestSMA5 = movingAverages.sma5[movingAverages.sma5.length - 1];
     const latestSMA20 = movingAverages.sma20[movingAverages.sma20.length - 1];
     
     // Determine y-axis min/max for scaling
     const allPrices = displayData.flatMap(d => [d.high, d.low]).filter(p => !isNaN(p));
-    const maxPrice = allPrices.length > 0 ? Math.max(...allPrices) : 1;
-    const minPrice = allPrices.length > 0 ? Math.min(...allPrices) : 0;
-    const range = maxPrice - minPrice;
+    // Include SMA values to ensure they stay on the chart
+    const allSMAValues = movingAverages.sma5.slice(-20).concat(movingAverages.sma20.slice(-20)).filter(p => p !== null && !isNaN(p));
+    const combinedPrices = [...allPrices, ...allSMAValues];
+
+    const maxPrice = combinedPrices.length > 0 ? Math.max(...combinedPrices) : 1;
+    const minPrice = combinedPrices.length > 0 ? Math.min(...combinedPrices) : 0;
     
-    // Prevent division by zero
-    const scaleFactor = range > 0 ? 100 / range : 0; 
+    // Add a small buffer to the min/max for better visual padding
+    const buffer = (maxPrice - minPrice) * 0.05 || 0.1;
+    const chartMax = maxPrice + buffer;
+    const chartMin = Math.max(0, minPrice - buffer); // Price can't be negative
+    const range = chartMax - chartMin;
     
+    // Calculate the pixel-to-price ratio for accurate positioning
+    const pixelPerUnit = range > 0 ? CHART_HEIGHT_PX / range : 0; 
+    
+    const formatPrice = (price) => price.toFixed(2);
+
+    // Utility function to convert a price value to a pixel height from the bottom of the chart
+    const priceToPixel = (price) => (price - chartMin) * pixelPerUnit;
+
     const SMA_COLORS = {
         5: 'bg-indigo-500',
         20: 'bg-red-500',
-        '5_line': 'absolute top-0 w-full h-[2px] bg-indigo-500', // Fixed syntax here
-        '20_line': 'absolute top-0 w-full h-[2px] bg-red-500', // Fixed syntax here
     };
 
     if (displayData.length === 0) {
         return (
-            <div className="text-center p-8 bg-gray-700 text-gray-400 rounded-lg">
-                No chart data available yet. Please check connection.
+            <div className="text-center p-8 bg-gray-700 text-gray-400 rounded-xl">
+                Fetching chart data... If this persists, check the connection status.
             </div>
         );
     }
     
-    const formatPrice = (price) => price.toFixed(2);
+    // Simplified price labels for Y-Axis
+    const yAxisLabels = [
+        chartMax,
+        chartMin + range * 0.75,
+        chartMin + range * 0.5,
+        chartMin + range * 0.25,
+        chartMin
+    ];
 
     return (
-        <div className="bg-gray-800 p-4 rounded-xl shadow-2xl transition-all w-full max-w-full overflow-x-auto">
+        <div className="bg-gray-800 p-4 rounded-xl shadow-2xl transition-all w-full overflow-x-auto">
             <div className="flex justify-between items-center text-gray-300 mb-4">
-                <h3 className="text-lg font-semibold">Price Action (Last 20 Candles)</h3>
+                <h3 className="text-lg font-semibold">Price Action (Last {displayData.length} Candles)</h3>
                 <div className="flex space-x-4 text-sm">
                     <span className="flex items-center">
                         <span className={`w-3 h-3 rounded-full mr-2 ${SMA_COLORS[5]}`}></span>
@@ -266,33 +292,63 @@ const PriceChart = ({ candlestickData, movingAverages }) => {
                 </div>
             </div>
 
-            <div className="flex h-96 relative border-l border-b border-gray-600">
+            <div className="flex relative border-l border-b border-gray-600" style={{ height: `${CHART_HEIGHT_PX}px` }}>
+                
+                {/* Y-Axis Price Labels & Grid Lines (Background) */}
+                <div className="absolute right-0 top-0 h-full w-full pointer-events-none">
+                    {yAxisLabels.map((price, index) => {
+                        const isMaxMin = index === 0 || index === yAxisLabels.length - 1;
+                        // Calculate position from bottom, relative to the chart height
+                        const bottomPosition = priceToPixel(price);
+
+                        return (
+                            <React.Fragment key={price}>
+                                {/* Horizontal Grid Line */}
+                                {!isMaxMin && (
+                                    <div 
+                                        className="absolute left-0 w-full border-t border-dashed border-gray-700"
+                                        style={{ bottom: `${bottomPosition}px` }}
+                                    ></div>
+                                )}
+                                {/* Label Text (aligned to the right border) */}
+                                <span 
+                                    className={`absolute right-[-4.5rem] text-xs px-1 rounded-sm ${isMaxMin ? 'font-bold text-indigo-400' : 'text-gray-400'}`}
+                                    style={{ bottom: `${bottomPosition - 8}px` }}
+                                >
+                                    {formatPrice(price)}
+                                </span>
+                            </React.Fragment>
+                        );
+                    })}
+                </div>
+
+
                 {/* Candlestick Visualization */}
                 {displayData.map((d, index) => {
                     const isUp = d.close > d.open;
-                    const wickHeight = Math.abs(d.high - d.low) * scaleFactor;
-                    const bodyHeight = Math.abs(d.open - d.close) * scaleFactor;
                     
-                    // Calculate positions relative to minPrice
-                    const lowPos = (d.low - minPrice) * scaleFactor;
-                    const openPos = (d.open - minPrice) * scaleFactor;
-                    const closePos = (d.close - minPrice) * scaleFactor;
+                    // Calculate pixel positions for Open, Close, High, Low
+                    const highPos = priceToPixel(d.high);
+                    const lowPos = priceToPixel(d.low);
+                    const openPos = priceToPixel(d.open);
+                    const closePos = priceToPixel(d.close);
                     
-                    // Body start is the lower of open/close
-                    const bodyStartOffset = (Math.min(openPos, closePos)) * 3.6; 
-                    const wickHeightPx = wickHeight * 3.6; 
-                    const bodyHeightPx = bodyHeight * 3.6; 
+                    // Body start is the lower of open/close, body height is the difference
+                    const bodyStartOffset = Math.min(openPos, closePos);
+                    const bodyHeightPx = Math.abs(openPos - closePos); 
+                    const wickHeightPx = highPos - lowPos; 
 
-                    // Color based on direction
                     const color = isUp ? 'bg-green-500' : 'bg-red-500';
+                    const wickColor = isUp ? 'bg-green-600' : 'bg-red-600';
 
                     return (
-                        <div key={d.openTime} className="flex flex-col flex-1 relative justify-end">
+                        <div key={d.openTime} className="flex flex-col flex-1 relative justify-end z-10">
+                            
                             {/* Wick (Full High-Low Range) */}
                             <div 
-                                className={`absolute left-1/2 -translate-x-1/2 w-[2px] ${isUp ? 'bg-green-600' : 'bg-red-600'} transition-all duration-100`}
+                                className={`absolute left-1/2 -translate-x-1/2 w-[2px] ${wickColor} transition-all duration-100`}
                                 style={{
-                                    bottom: `${lowPos * 3.6}px`, // Wick starts at Low
+                                    bottom: `${lowPos}px`, // Wick starts at Low position
                                     height: `${wickHeightPx}px`
                                 }}
                             ></div>
@@ -302,46 +358,62 @@ const PriceChart = ({ candlestickData, movingAverages }) => {
                                 className={`absolute left-1/2 -translate-x-1/2 w-3 ${color} rounded-sm transition-all duration-100`}
                                 style={{
                                     bottom: `${bodyStartOffset}px`,
-                                    height: `${bodyHeightPx}px`
+                                    height: `${bodyHeightPx > 1 ? bodyHeightPx : 1}px` // Minimum height of 1px for flat candles
                                 }}
                             ></div>
+
+                            {/* Tooltip placeholder for the candle */}
+                             <div className="absolute inset-0 group cursor-pointer z-20">
+                                <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 p-2 bg-gray-900 text-gray-200 text-xs rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+                                    <p>Time: {new Date(d.openTime).toLocaleTimeString()}</p>
+                                    <p>Open: {formatPrice(d.open)}</p>
+                                    <p>Close: {formatPrice(d.close)}</p>
+                                    <p>H/L: {formatPrice(d.high)}/{formatPrice(d.low)}</p>
+                                    <p>Vol: {d.volume.toFixed(0)}</p>
+                                </div>
+                            </div>
+
                         </div>
                     );
                 })}
 
-                {/* Y-Axis Price Labels (Right side) */}
-                <div className="absolute right-0 top-0 h-full w-16 flex flex-col justify-between text-xs text-gray-400">
-                    <span className="absolute top-[-0.5rem] right-0 font-bold">{formatPrice(maxPrice)}</span>
-                    <span className="absolute bottom-[-0.5rem] right-0 font-bold">{formatPrice(minPrice)}</span>
-                </div>
+                {/* Moving Average Overlay (Line visualization - connecting dots) */}
+                <svg className="absolute top-0 left-0 w-full h-full pointer-events-none z-30" style={{ height: `${CHART_HEIGHT_PX}px` }}>
+                    {
+                        [5, 20].map(window => {
+                            const smaValues = movingAverages[`sma${window}`];
+                            const color = window === 5 ? 'indigo' : 'red';
+                            
+                            const startIndex = candlestickData.length - displayData.length;
+                            const points = displayData
+                                .map((d, index) => {
+                                    const smaValue = smaValues[startIndex + index];
+                                    if (smaValue === null) return null;
 
-                {/* Moving Average Overlay (Simple dots visualization) */}
-                {displayData.map((d, index) => {
-                    const sma5Value = movingAverages.sma5[candlestickData.length - displayData.length + index];
-                    const sma20Value = movingAverages.sma20[candlestickData.length - displayData.length + index];
+                                    // Calculate X and Y coordinates for SVG
+                                    const x = (index + 0.5) * (100 / displayData.length); // 0.5 centers it on the candle
+                                    const y = CHART_HEIGHT_PX - priceToPixel(smaValue);
 
-                    const sma5Pos = sma5Value !== null ? (sma5Value - minPrice) * scaleFactor * 3.6 : null;
-                    const sma20Pos = sma20Value !== null ? (sma20Value - minPrice) * scaleFactor * 3.6 : null;
+                                    return `${x}% ${y}`;
+                                })
+                                .filter(p => p !== null)
+                                .join(' ');
 
-                    return (
-                        <div key={`sma-${d.openTime}`} className="flex-1 relative">
-                            {sma5Pos !== null && (
-                                <div 
-                                    className={`absolute left-1/2 -translate-x-1/2 w-2 h-2 rounded-full ${SMA_COLORS[5]} transition-all duration-100`}
-                                    style={{ bottom: `${sma5Pos}px` }}
-                                    title={`SMA 5: ${formatPrice(sma5Value)}`}
-                                ></div>
-                            )}
-                            {sma20Pos !== null && (
-                                <div 
-                                    className={`absolute left-1/2 -translate-x-1/2 w-2 h-2 rounded-full ${SMA_COLORS[20]} transition-all duration-100`}
-                                    style={{ bottom: `${sma20Pos}px` }}
-                                    title={`SMA 20: ${formatPrice(sma20Value)}`}
-                                ></div>
-                            )}
-                        </div>
-                    );
-                })}
+                            if (points.length < 2) return null;
+
+                            return (
+                                <polyline 
+                                    key={`sma-line-${window}`}
+                                    fill="none"
+                                    stroke={`var(--tw-color-${color}-400)`}
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    points={points}
+                                />
+                            );
+                        })
+                    }
+                </svg>
 
             </div>
         </div>
@@ -355,6 +427,7 @@ const COIN_OPTIONS = [
     { label: 'Bitcoin (BTC/USDT)', value: 'btcusdt' },
     { label: 'Ethereum (ETH/USDT)', value: 'ethusdt' },
     { label: 'Solana (SOL/USDT)', value: 'solusdt' },
+    { label: 'XRP (XRP/USDT)', value: 'xrpusdt' }, // Added XRP
 ];
 
 const TIMEFRAME_OPTIONS = [
@@ -362,6 +435,7 @@ const TIMEFRAME_OPTIONS = [
     { label: '5 Minutes', value: '5m' },
     { label: '15 Minutes', value: '15m' },
     { label: '1 Hour', value: '1h' },
+    { label: '4 Hour', value: '4h' }, // Added 4 Hour
 ];
 
 const PREFS_DOC_PATH = (userId) => `artifacts/${appId}/users/${userId}/preferences/trading_dashboard`;
@@ -447,7 +521,7 @@ export default function App() {
         }
     }, [isAuthReady, userId]);
 
-    // Custom Hook call (Removed db/userId dependencies as they are not needed in the hook)
+    // Custom Hook call
     const { 
         candlestickData, 
         latestPrice, 
@@ -461,12 +535,14 @@ export default function App() {
     const handleSymbolChange = useCallback((event) => {
         const newSymbol = event.target.value;
         setSelectedSymbol(newSymbol);
+        // Save new symbol but keep existing interval
         savePreferences(newSymbol, selectedInterval);
     }, [selectedInterval, savePreferences]);
     
     const handleIntervalChange = useCallback((event) => {
         const newInterval = event.target.value;
         setSelectedInterval(newInterval);
+        // Save new interval but keep existing symbol
         savePreferences(selectedSymbol, newInterval);
     }, [selectedSymbol, savePreferences]);
 
@@ -503,7 +579,7 @@ export default function App() {
         return () => clearTimeout(timer);
     }, [liveTickerPrice]); 
 
-    // Loading State Check
+    // Loading State Check (Wait for both Auth and initial data fetch)
     if (!isAuthReady || isLoading) {
         return (
             <div className="flex justify-center items-center h-screen bg-gray-900 text-white">
@@ -522,8 +598,20 @@ export default function App() {
     return (
         <div className="min-h-screen bg-gray-900 text-white p-4 md:p-8 font-inter">
             <style jsx="true">{`
-                .flash-up { transition: color 0.15s ease-in; }
-                .flash-down { transition: color 0.15s ease-in; }
+                .flash-up { animation: flash-up-animation 0.3s ease-in-out; }
+                .flash-down { animation: flash-down-animation 0.3s ease-in-out; }
+
+                @keyframes flash-up-animation {
+                    0% { color: var(--tw-color-white); transform: scale(1); }
+                    50% { color: var(--tw-color-green-400); transform: scale(1.05); }
+                    100% { color: var(--tw-color-white); transform: scale(1); }
+                }
+                @keyframes flash-down-animation {
+                    0% { color: var(--tw-color-white); transform: scale(1); }
+                    50% { color: var(--tw-color-red-400); transform: scale(1.05); }
+                    100% { color: var(--tw-color-white); transform: scale(1); }
+                }
+
                 .app-select { 
                     appearance: none; 
                     /* Custom SVG Arrow for the select box */
@@ -531,6 +619,7 @@ export default function App() {
                     background-repeat: no-repeat;
                     background-position: right 0.5rem center;
                     background-size: 1.5em 1.5em;
+                    padding-right: 2.5rem; /* Add space for the custom arrow */
                 }
             `}</style>
             
@@ -598,7 +687,7 @@ export default function App() {
                             <span className="live-label text-xs font-medium text-indigo-400 uppercase">
                                 Live Price (Ticker)
                             </span>
-                            <h1 className={`text-3xl sm:text-4xl font-extrabold ${livePriceColor}`}>
+                            <h1 className={`text-3xl sm:text-4xl font-extrabold transition-all duration-300 ${livePriceColor}`}>
                                 ${liveTickerPrice.toFixed(4)}
                             </h1>
                             <span className="candle-close text-xs text-gray-500">
