@@ -83,7 +83,8 @@ const CandlestickChart = ({ candlestickData, movingAverages }) => {
                 type: 'timeseries', 
                 time: {
                     unit: 'minute',
-                    tooltipFormat: 'MMM D, h:mm a'
+                    // FIX: 'D' (Day of Year) ko 'd' (Day of Month) se replace kiya gaya.
+                    tooltipFormat: 'MMM d, h:mm a' 
                 },
                 title: { display: true, text: 'Time' },
             },
@@ -108,7 +109,11 @@ const CandlestickChart = ({ candlestickData, movingAverages }) => {
                 mode: 'index',
                 intersect: false,
                 callbacks: {
-                    title: (context) => `Time: ${new Date(context[0].parsed.x).toLocaleTimeString()}`,
+                    title: (context) => {
+                        // Agar context mein data hai, toh date format karein
+                        const timeValue = context[0]?.parsed?.x;
+                        return timeValue ? `Time: ${new Date(timeValue).toLocaleTimeString()}` : 'Time: N/A';
+                    },
                     label: (context) => {
                         // Tooltip mein Candlestick, Volume, aur SMA data ko dikhana
                         if (context.datasetIndex === 0 && context.raw) {
